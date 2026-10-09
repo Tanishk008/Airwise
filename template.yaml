@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AIRWISE v2 — Air Quality Intelligence & Response System
+  Backend: API Gateway HTTP API + Lambda (Node 20) + DynamoDB (4 tables with GSIs)
+
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Default: "*"
+    Description: "Set to your Amplify HTTPS URL after first deploy (e.g. https://abc.amplifyapp.com)"
+  OpenAQApiKey:
+    Type: String
+    Default: ""
+    Description: "Optional OpenAQ v3 API key for measured station data (leave blank if not used)"
+    NoEcho: true
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Environment:
+      Variables:
+        CAMPUS_TABLE: !Ref CampusTable
+        ASSESS_TABLE: !Ref AssessTable
+        PLAN_TABLE: !Ref PlanTable
+        INCIDENT_TABLE: !Ref IncidentTable
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+        OPENAQ_API_KEY: !Ref OpenAQApiKey
+
+Resources:
+  # ─── DynamoDB Tables ─────────────────────────────────────────────────────────
+
+  CampusTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: campusId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: campusId, KeyType: HASH }
+
+  AssessTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: assessmentId, AttributeType: S }
+        - { AttributeName: campusId, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: assessmentId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: campusId-createdAt-index
+          KeySchema:
+            - { AttributeName: campusId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
+
+  PlanTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: planId, AttributeType: S }
+        - { AttributeName: campusId, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: planId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: campusId-createdAt-index
+          KeySchema:
+            - { AttributeName: campusId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
+
+  IncidentTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: incidentId, AttributeType: S }
+        - { AttributeName: campusId, AttributeType: S }
+        - { AttributeName: reportedAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: incidentId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: campusId-reportedAt-index
+          KeySchema:
+            - { AttributeName: campusId, KeyType: HASH }
+            - { AttributeName: reportedAt, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
+
+  # ─── API Gateway ──────────────────────────────────────────────────────────────
+
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref AllowedOrigin
+        AllowMethods:
+          - GET
+          - POST
+          - PATCH
+          - OPTIONS
+        AllowHeaders:
+          - content-type
+          - x-api-key
+        MaxAge: 300
+
+  # ─── Lambda Function ──────────────────────────────────────────────────────────
+
+  AirwiseFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "airwise-api-${AWS::StackName}"
+      CodeUri: backend/
+      Handler: src/handler.handler
+      Description: "AIRWISE API — air data, risk engine, response plans"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CampusTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AssessTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PlanTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IncidentTable
+      Events:
+        Any:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /api/v1/{proxy+}
+            Method: ANY
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway base URL — set this as NEXT_PUBLIC_API_URL in Amplify"
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com"
+  HealthEndpoint:
+    Description: "Health check endpoint"
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/api/v1/health"
+  LambdaArn:
+    Description: "Lambda function ARN"
+    Value: !GetAtt AirwiseFn.Arn

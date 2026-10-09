@@ -1,0 +1,16 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - cd app && npm ci
+    build:
+      commands:
+        - cd app && npm run build
+  artifacts:
+    baseDirectory: app/out
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - app/node_modules/**/*

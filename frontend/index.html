@@ -1,0 +1,64 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIRWISE — Air Quality Intelligence & Response</title>
+<style>
+:root{--bg:#0b1220;--card:#131c2e;--line:#243049;--tx:#e8edf7;--mut:#8fa0bd;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--acc:#60a5fa}
+@media(prefers-color-scheme:light){:root{--bg:#f4f6fb;--card:#fff;--line:#d9e0ee;--tx:#0f172a;--mut:#5b6b88}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line)}
+h1{font-size:18px;margin:0;letter-spacing:.5px}nav{display:flex;gap:4px;flex-wrap:wrap}nav a{padding:6px 12px;border-radius:8px;color:var(--mut);text-decoration:none}nav a.on{background:var(--card);color:var(--tx);border:1px solid var(--line)}
+main{max-width:1000px;margin:auto;padding:20px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+select,input,textarea,button{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--tx)}button{cursor:pointer;background:var(--acc);color:#04111f;border:0;font-weight:600}button.g{background:transparent;color:var(--tx);border:1px solid var(--line)}
+.pill{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:600;background:var(--line)}.s-monitor{color:var(--ok)}.s-review_required{color:var(--warn)}.s-action_recommended{color:var(--bad)}.s-insufficient_data{color:var(--mut)}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}.m{color:var(--mut);font-size:13px}.big{font-size:30px;font-weight:700}
+.warn{border-left:4px solid var(--warn);padding:8px 12px;background:var(--bg);border-radius:6px;margin:8px 0;font-size:13px}table{width:100%;border-collapse:collapse}td,th{padding:6px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
+.err{color:var(--bad)}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+</style></head><body>
+<header><h1>🌫️ AIRWISE</h1><nav id="nav"></nav><span style="flex:1"></span><select id="campus" aria-label="Campus"></select></header>
+<main id="app">Loading…</main>
+<script src="config.js"></script>
+<script>
+const API=(window.AIRWISE_API||"").replace(/\/$/,"")+"/api/v1";
+const e=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const api=async(p,o={})=>{const r=await fetch(API+p,{headers:{"content-type":"application/json"},...o,body:o.body&&JSON.stringify(o.body)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error?.message||"Request failed ("+r.status+")");return j};
+const S={campuses:[],cid:null,last:null};const TABS=[["overview","Overview"],["air","Air data"],["assessment","Assessment"],["response","Response"],["history","History"]];
+const fmt=t=>new Date(t).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"});
+const pill=s=>`<span class="pill s-${e(s)}">${e(s).replace(/_/g," ")}</span>`;
+const DISC=`<p class="m">Decision support only — not medical advice or an official government alert.</p>`;
+function chart(pts,color,label){if(!pts.length)return"";const W=480,H=120,mx=Math.max(...pts.map(p=>p.value),1);
+ const d=pts.map((p,i)=>`${i?"L":"M"}${(i/(pts.length-1||1))*W},${H-(p.value/mx)*(H-10)}`).join(" ");
+ return `<div class="m">${label} — peak ${mx.toFixed(1)} µg/m³ (modelled forecast)</div><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${label} forecast"><path d="${d}" fill="none" stroke="${color}" stroke-width="2"/></svg>`}
+const next24=(air,p)=>air.forecast.filter(f=>f.pollutant===p&&Date.parse(f.time)>=Date.now()-36e5).slice(0,24);
+const V={
+async overview(){const[air,a]=await Promise.all([api("/air-quality?campusId="+S.cid),api("/assessments?campusId="+S.cid)]);const l=a.assessments[0];
+ return `<div class="grid"><div class="card"><div class="m">Modelled PM2.5 now</div><div class="big">${e(air.modelledCurrent?.pm2_5??"—")} <small class="m">µg/m³</small></div><div class="m">Forecast model · ${air.modelledCurrent?fmt(air.modelledCurrent.time):""}</div></div>
+ <div class="card"><div class="m">Latest assessment</div><div class="big">${l?pill(l.status):"None yet"}</div><div class="m">${l?fmt(l.createdAt)+" · "+e(l.activity):'Run one in the Assessment tab'}</div></div></div>
+ <div class="card">${chart(next24(air,"pm2_5"),"#f87171","PM2.5 next 24h")}${chart(next24(air,"pm10"),"#60a5fa","PM10 next 24h")}</div>
+ ${air.warnings.map(w=>`<div class="warn">${e(w)}</div>`).join("")}${DISC}`},
+async air(){const air=await api("/air-quality?campusId="+S.cid);const rows=["pm2_5","pm10","nitrogen_dioxide","ozone"].map(p=>{const f=air.forecast.find(x=>x.pollutant===p&&Date.parse(x.time)>=Date.now()-36e5);return f?`<tr><td>${p}</td><td>${f.value}</td><td>${e(f.unit)}</td><td>${e(f.dataMode)}</td><td>${e(f.provider)}</td><td>${fmt(f.time)}</td></tr>`:""}).join("");
+ return `<div class="card"><h3>Pollutants (hourly values, no combined AQI)</h3><table><tr><th>Pollutant</th><th>Value</th><th>Unit</th><th>Mode</th><th>Source</th><th>Valid for</th></tr>${rows}</table><p class="m">Retrieved ${fmt(air.retrievedAt)}</p></div>${air.warnings.map(w=>`<div class="warn">${e(w)}</div>`).join("")}`},
+async assessment(){return `<div class="card"><h3>Run an assessment</h3><div class="row"><select id="act"><option value="outdoor_sports">Outdoor sports</option><option value="assembly">Assembly</option><option value="outdoor_work">Outdoor work</option></select><button onclick="runA()">Assess</button></div></div><div id="res">${S.last?renderA(S.last):""}</div>${DISC}`},
+async response(){const{plans}=await api("/action-plans?campusId="+S.cid);return plans.length?plans.map(p=>`<div class="card"><div class="row"><b>${e(p.planId)}</b>${pill(p.status)}<span class="m">${e(p.approvedBy?"approved by "+p.approvedBy:"")}</span></div>
+ ${p.status==="draft"?`<div class="row"><button onclick="patch('${p.planId}',{operation:'approve_plan',actor:'Campus administrator'})">Approve</button><button class="g" onclick="patch('${p.planId}',{operation:'dismiss_plan'})">Dismiss</button></div>`:""}
+ <table>${p.actions.map(a=>`<tr><td>${e(a.label)}<div class="m">${e(a.owner)}</div></td><td>${p.status==="approved"||p.status==="completed"?`<select onchange="patch('${p.planId}',{operation:'update_action',actionId:'${a.actionId}',status:this.value})">${["pending","in_progress","completed"].map(s=>`<option ${s===a.status?"selected":""}>${s}</option>`).join("")}</select>`:e(a.status)}</td></tr>`).join("")}</table>
+ <details><summary class="m">Audit trail</summary>${p.audit.map(x=>`<div class="m">${fmt(x.at)} · ${e(x.by)} · ${e(x.event)}</div>`).join("")}</details></div>`).join(""):`<div class="card">No plans yet. Create one from an assessment.</div>`},
+async history(){const[a,i,p]=await Promise.all([api("/assessments?campusId="+S.cid),api("/incidents?campusId="+S.cid),api("/action-plans?campusId="+S.cid)]);
+ const acts=p.plans.flatMap(x=>x.actions),done=acts.filter(x=>x.status==="completed").length;const ap=p.plans.filter(x=>x.approvedAt);
+ const avg=ap.length?Math.round(ap.reduce((s,x)=>s+(Date.parse(x.approvedAt)-Date.parse(x.createdAt)),0)/ap.length/60000):null;
+ return `<div class="grid"><div class="card"><div class="m">Actions completed</div><div class="big">${done}/${acts.length}</div></div><div class="card"><div class="m">Avg. time to approval</div><div class="big">${avg===null?"—":avg+" min"}</div></div></div>
+ <div class="card"><h3>Assessments</h3><table>${a.assessments.map(x=>`<tr><td>${fmt(x.createdAt)}</td><td>${e(x.activity)}</td><td>${pill(x.status)}</td><td class="m">${e(x.dataMode)}</td></tr>`).join("")||"<tr><td>None</td></tr>"}</table></div>
+ <div class="card"><h3>Report smoke / dust (unverified)</h3><div class="row"><select id="it"><option>smoke</option><option>dust</option><option>other</option></select><input id="ds" placeholder="What did you observe? (no personal data)" maxlength="300" style="flex:1"><button onclick="inc()">Submit</button></div>
+ ${i.incidents.map(x=>`<div class="m">${fmt(x.reportedAt)} · ${e(x.incidentType)} · <i>reported, not verified</i> · ${e(x.description)}</div>`).join("")}</div>`}};
+function renderA(a){return `<div class="card"><div class="row"><h3 style="margin:0">Assessment</h3>${pill(a.status)}</div>
+ <h4>Why?</h4>${a.reasons.map(r=>`<div class="warn">${e(r.message)}</div>`).join("")}
+ <h4>Evidence</h4><table>${Object.entries(a.evidence).map(([k,v])=>`<tr><td>${k}</td><td>24h mean ${v.mean24h} / max ${v.max} ${e(v.unit)}</td><td class="m">${e(v.dataMode)} · ${e(v.provider)}</td></tr>`).join("")}</table>
+ <p class="m">Guideline: ${e(a.guidelineVersion)} · source time ${fmt(a.sourceTimestamp)}</p>
+ ${a.recommendedActions.length?`<button onclick="mkPlan('${a.assessmentId}')">Create draft response plan</button>`:""}</div>`}
+async function runA(){const r=$("res");r.textContent="Assessing…";try{S.last=await api("/assessments",{method:"POST",body:{campusId:S.cid,activity:$("act").value}});r.innerHTML=renderA(S.last)}catch(x){r.innerHTML=`<div class="card err">${e(x.message)}</div>`}}
+const $=i=>document.getElementById(i);
+async function mkPlan(id){try{await api("/action-plans",{method:"POST",body:{assessmentId:id}});location.hash="response"}catch(x){alert(x.message)}}
+async function patch(id,b){try{await api("/action-plans/"+id,{method:"PATCH",body:b})}catch(x){alert(x.message)}render()}
+async function inc(){try{await api("/incidents",{method:"POST",body:{campusId:S.cid,incidentType:$("it").value,description:$("ds").value}});render()}catch(x){alert(x.message)}}
+async function render(){const t=location.hash.slice(1)||"overview";$("nav").innerHTML=TABS.map(([k,n])=>`<a href="#${k}" class="${k===t?"on":""}">${n}</a>`).join("");
+ try{$("app").innerHTML=await V[t]()}catch(x){$("app").innerHTML=`<div class="card err">⚠ ${e(x.message)} <button class="g" onclick="render()">Retry</button></div>`}}
+(async()=>{try{S.campuses=(await api("/campuses")).campuses;S.cid=S.campuses[0].campusId;$("campus").innerHTML=S.campuses.map(c=>`<option value="${e(c.campusId)}">${e(c.name)}</option>`).join("");$("campus").onchange=ev=>{S.cid=ev.target.value;S.last=null;render()};addEventListener("hashchange",render);render()}catch(x){$("app").innerHTML=`<div class="card err">Backend unreachable: ${e(x.message)}. Check config.js.</div>`}})();
+</script></body></html>
