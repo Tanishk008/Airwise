@@ -2,11 +2,13 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useApp } from "@/lib/context";
-import { api, ActionPlan, ActionStatus, PlanStatus, AirwiseApiError } from "@/lib/api";
+import { api, ActionPlan, ActionStatus, AirwiseApiError, OutcomeStatus } from "@/lib/api";
 import { Card, ErrorCard, LoadingCard, SectionHeader, Button, Badge, WarnBanner, Disclaimer } from "@/components/ui/Card";
-import { fmtDate, fmtRelative, planStatusConfig, actionStatusConfig, clsx } from "@/lib/utils";
+import { RecordOutcome } from "@/components/ui/RecordOutcome";
+import { fmtDate, fmtRelative, planStatusConfig, actionStatusConfig, clsx, fmtOutcomeStatus } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
-import { ShieldAlert, User, ChevronDown, ChevronUp, AlertTriangle, Megaphone, Copy, Check, CheckCircle2, X, Filter } from "lucide-react";
+import { ShieldAlert, User, ChevronDown, ChevronUp, AlertTriangle, Megaphone, Copy, Check, CheckCircle2, X, FileText } from "lucide-react";
+import { DecisionReceiptModal } from "@/components/ui/DecisionReceiptModal";
 
 function AuditTrail({ audit }: { audit: ActionPlan["audit"] }) {
   const [expanded, setExpanded] = useState(false);
@@ -117,16 +119,19 @@ function PlanCard({
   onRefresh,
   onOpenApprove,
   onOpenDismiss,
+  onOpenRecordOutcome,
 }: {
   plan: ActionPlan;
   onRefresh: () => void;
   onOpenApprove: (plan: ActionPlan) => void;
   onOpenDismiss: (plan: ActionPlan) => void;
+  onOpenRecordOutcome: (plan: ActionPlan) => void;
 }) {
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [alertOpen, setAlertOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [receiptOpen, setReceiptOpen] = useState(false);
 
   const statusCfg = planStatusConfig[plan.status];
   const completedCount = plan.actions.filter(a => a.status === "completed").length;
@@ -181,10 +186,15 @@ function PlanCard({
             </span>
             <span className="text-xs text-[#64748b] mono font-bold">({plan.planId})</span>
           </div>
-          <p className="text-xs text-[#94a3b8]">
+          <p className="text-xs text-[#94a3b8] mb-2">
             Source: <span className="text-[#f1f5f9] mono">{plan.assessmentId}</span> · Created {fmtDate(plan.createdAt)}
             {plan.approvedBy && ` · Approved by ${plan.approvedBy}`}
           </p>
+          {plan.decisionReceipt && (
+            <Button size="sm" variant="secondary" onClick={() => setReceiptOpen(true)}>
+              <FileText size={13} className="mr-1.5" /> View Decision Receipt
+            </Button>
+          )}
         </div>
 
         {plan.status === "approved" && (
@@ -278,7 +288,6 @@ function PlanCard({
         </motion.div>
       )}
 
-      {/* Actions */}
       <div className="space-y-2 mb-3">
         {plan.actions.map(action => (
           <ActionTaskRow
@@ -291,9 +300,32 @@ function PlanCard({
         ))}
       </div>
 
+      {plan.outcomeStatus && (
+        <div className="mb-3 p-3 rounded-lg border border-[#1e2f4d] bg-[#070c14] text-xs">
+          <p className="text-[10px] text-[#94a3b8] uppercase tracking-wider font-semibold mb-1.5">Intervention Outcome</p>
+          <div className="flex items-center gap-2 mb-1.5">
+            <Badge variant="blue">{fmtOutcomeStatus(plan.outcomeStatus)}</Badge>
+            <span className="text-[10px] text-[#64748b]">Recorded by {plan.outcomeRecordedBy}</span>
+          </div>
+          {plan.outcomeNotes && <p className="text-[#cbd5e1] leading-relaxed">{plan.outcomeNotes}</p>}
+        </div>
+      )}
+
+      {!plan.outcomeStatus && (plan.status === "completed" || plan.status === "dismissed") && (
+        <div className="mb-3">
+          <Button variant="ghost" size="sm" onClick={() => onOpenRecordOutcome(plan)}>
+            Record Real-World Outcome
+          </Button>
+        </div>
+      )}
+
       {error && <WarnBanner>{error}</WarnBanner>}
 
       <AuditTrail audit={plan.audit} />
+
+      {receiptOpen && plan.decisionReceipt && (
+        <DecisionReceiptModal receipt={plan.decisionReceipt} onClose={() => setReceiptOpen(false)} />
+      )}
     </Card>
   );
 }
@@ -315,6 +347,9 @@ export default function ResponsePage() {
   const [dismissalReason, setDismissalReason] = useState<string>("Event relocated indoors");
   const [dismissing, setDismissing] = useState(false);
 
+  // Record Outcome Modal state
+  const [recordOutcomeModalPlan, setRecordOutcomeModalPlan] = useState<ActionPlan | null>(null);
+
   const load = useCallback(async () => {
     if (!selectedCampus) return;
     setLoading(true);
@@ -330,8 +365,32 @@ export default function ResponsePage() {
   }, [selectedCampus]);
 
   useEffect(() => {
-    load();
-  }, [load, refreshKey]);
+    let active = true;
+    if (!selectedCampus) return;
+    const cid = selectedCampus.campusId;
+    
+    void (async () => {
+      await Promise.resolve();
+      if (!active) return;
+      setLoading(true);
+      setError(null);
+      api.getActionPlans(cid)
+        .then(({ plans: list }) => {
+          if (!active) return;
+          setPlans(list);
+        })
+        .catch(e => {
+          if (!active) return;
+          setError(e instanceof AirwiseApiError ? e.message : "Failed to load action plans");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedCampus, refreshKey]);
 
   const handleApproveConfirm = async () => {
     if (!approveModalPlan) return;
@@ -367,11 +426,20 @@ export default function ResponsePage() {
     }
   };
 
+  const handleRecordOutcome = async (outcomeStatus: OutcomeStatus, notes: string) => {
+    if (!recordOutcomeModalPlan) return;
+    await api.recordOutcome(recordOutcomeModalPlan.planId, outcomeStatus, notes);
+    setRecordOutcomeModalPlan(null);
+    await load();
+    refresh();
+  };
+
   if (!selectedCampus) return <div className="text-[#64748b] text-sm">Select a campus.</div>;
 
   const draftCount = plans.filter(p => p.status === "draft").length;
   const approvedCount = plans.filter(p => p.status === "approved").length;
   const completedCount = plans.filter(p => p.status === "completed").length;
+  const dismissedCount = plans.filter(p => p.status === "dismissed").length;
 
   const filteredPlans = plans.filter(p => {
     if (statusFilter === "all") return true;
@@ -386,7 +454,7 @@ export default function ResponsePage() {
       />
 
       {/* Stats row */}
-      <div className="grid grid-cols-3 gap-3 md:gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
         <Card className="border-[#1e2f4d] bg-[#0f1a2e]">
           <p className="text-[11px] text-[#94a3b8] uppercase tracking-wider font-semibold mb-1">Awaiting Approval</p>
           <p className={clsx("text-2xl md:text-3xl font-bold mono", draftCount > 0 ? "text-[#fbbf24]" : "text-[#64748b]")}>
@@ -405,6 +473,12 @@ export default function ResponsePage() {
             {completedCount}
           </p>
         </Card>
+        <Card className="border-[#1e2f4d] bg-[#0f1a2e]">
+          <p className="text-[11px] text-[#94a3b8] uppercase tracking-wider font-semibold mb-1">Dismissed Plans</p>
+          <p className={clsx("text-2xl md:text-3xl font-bold mono", dismissedCount > 0 ? "text-[#94a3b8]" : "text-[#64748b]")}>
+            {dismissedCount}
+          </p>
+        </Card>
       </div>
 
       {/* Filter Tabs */}
@@ -414,6 +488,7 @@ export default function ResponsePage() {
           { key: "draft", label: `Draft (${draftCount})` },
           { key: "approved", label: `In Progress (${approvedCount})` },
           { key: "completed", label: `Completed (${completedCount})` },
+          { key: "dismissed", label: `Dismissed (${dismissedCount})` },
         ].map(tab => (
           <button
             key={tab.key}
@@ -457,6 +532,7 @@ export default function ResponsePage() {
                 onRefresh={load}
                 onOpenApprove={setApproveModalPlan}
                 onOpenDismiss={setDismissModalPlan}
+                onOpenRecordOutcome={setRecordOutcomeModalPlan}
               />
             </motion.div>
           ))}
@@ -568,6 +644,17 @@ export default function ResponsePage() {
               </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      {/* Record Outcome Modal */}
+      <AnimatePresence>
+        {recordOutcomeModalPlan && (
+          <RecordOutcome
+            plan={recordOutcomeModalPlan}
+            onRecord={handleRecordOutcome}
+            onCancel={() => setRecordOutcomeModalPlan(null)}
+          />
         )}
       </AnimatePresence>
 

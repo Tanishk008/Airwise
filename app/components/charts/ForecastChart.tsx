@@ -92,14 +92,24 @@ export function ForecastChart({
   const [activePollutants, setActivePollutants] = useState<string[]>(defaultPollutants);
 
   useEffect(() => {
-    setActivePollutants(defaultPollutants);
+    void (async () => {
+      await Promise.resolve();
+      setActivePollutants(defaultPollutants);
+    })();
   }, [defaultPollutants]);
 
   // Available pollutants in dataset
   const availablePollutants = useMemo(() => {
     const set = new Set<string>();
     forecast.forEach(f => set.add(f.pollutant));
-    return Array.from(set).filter(p => ["pm2_5", "pm10", "nitrogen_dioxide", "ozone"].includes(p));
+    return Array.from(set).filter(p => [
+      "pm2_5",
+      "pm10",
+      "nitrogen_dioxide",
+      "ozone",
+      "sulphur_dioxide",
+      "carbon_monoxide",
+    ].includes(p));
   }, [forecast]);
 
   const togglePollutant = (p: string) => {
@@ -110,8 +120,9 @@ export function ForecastChart({
     });
   };
 
+  const [now] = useState(() => Date.now());
+
   const chartData = useMemo(() => {
-    const now = Date.now();
     const cutoff = now + hours * 3600 * 1000;
     const timeMap = new Map<string, Record<string, number>>();
 
@@ -134,7 +145,7 @@ export function ForecastChart({
         label: format(parseISO(time), "HH:mm"),
         ...vals,
       }));
-  }, [forecast, activePollutants, hours]);
+  }, [forecast, activePollutants, hours, now]);
 
   if (!chartData.length) {
     return (

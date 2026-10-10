@@ -1,7 +1,7 @@
 // AIRWISE — typed API client
 // All external air-data calls happen on the backend; this module only calls our own API.
 
-const rawApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
+const rawApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "").trim().replace(/\/+$/, "");
 export const API_BASE = rawApiUrl.endsWith("/api/v1")
   ? rawApiUrl
   : rawApiUrl
@@ -14,6 +14,8 @@ export type PlanStatus = "draft" | "approved" | "dismissed" | "completed";
 export type ActionStatus = "pending" | "in_progress" | "completed";
 export type IncidentType = "smoke" | "dust" | "other";
 export type ActivityType = "outdoor_sports" | "assembly" | "outdoor_work";
+export type QualityStatus = "good" | "limited" | "stale" | "insufficient" | "unavailable";
+export type OutcomeStatus = "improved" | "unchanged" | "worsened" | "unable_to_determine";
 
 export interface Campus {
   campusId: string;
@@ -43,6 +45,24 @@ export interface ModelledCurrent {
   dataMode: DataMode;
 }
 
+export interface DataQuality {
+  sourceType: "observed" | "forecast" | "mixed" | "unavailable";
+  sourceName: string;
+  retrievedAt: string;
+  ageMinutes: number | null;
+  isStale: boolean;
+  validPollutants: string[];
+  missingPollutants: string[];
+  validHourCount: number;
+  expectedHourCount: number;
+  coveragePercent: number;
+  stationDistanceKm?: number | null;
+  qualityStatus: QualityStatus;
+  warnings: string[];
+  limitations: string[];
+  pollutantHours: Record<string, number>;
+}
+
 export interface AirQualityResponse {
   campusId: string;
   retrievedAt: string;
@@ -50,6 +70,7 @@ export interface AirQualityResponse {
   forecast: ForecastPoint[];
   modelledCurrent: ModelledCurrent | null;
   warnings: string[];
+  dataQuality?: DataQuality;
 }
 
 export interface AssessmentReason {
@@ -62,6 +83,35 @@ export interface RecommendedAction {
   label: string;
   owner: string;
   requiresApproval: boolean;
+}
+
+export interface ActionRecommendation {
+  id: string;
+  rank: number;
+  title: string;
+  description: string;
+  priority: number;
+  affectedActivity: string;
+  reasonCodes: string[];
+  evidence: unknown[];
+  supportingPollutants: string[];
+  suggestedSteps: string[];
+  assignedRole: string;
+  requiresApproval: boolean;
+  constraints: string[];
+  dataQualityWarnings: string[];
+  eligibilityStatus: string;
+  sourceAssessmentId: string;
+  createdAt: string;
+}
+
+export interface WhatIfOption {
+  id: string;
+  label: string;
+  description: string;
+  operationalEffect: string;
+  constraints: string[];
+  dataQualityNote?: string | null;
 }
 
 export interface EvidenceEntry {
@@ -90,6 +140,8 @@ export interface Assessment {
   recommendedActions: RecommendedAction[];
   approvedBy?: string | null;
   disclaimer?: string;
+  dataQuality?: DataQuality;
+  recommendations?: ActionRecommendation[];
 }
 
 export interface ActionItem {
@@ -107,6 +159,24 @@ export interface AuditEntry {
   event: string;
 }
 
+export interface DataQuality {
+  reliability: string;
+  warnings: string[];
+}
+
+export interface DecisionReceipt {
+  assessmentId: string;
+  campusId: string;
+  activity: ActivityType;
+  assessmentTimestamp: string;
+  evidence: Record<string, EvidenceEntry>;
+  dataQuality: DataQuality;
+  selectedAlternative: string;
+  actions: string[];
+  generatedAt: string;
+  hash: string;
+}
+
 export interface ActionPlan {
   planId: string;
   assessmentId: string;
@@ -118,6 +188,12 @@ export interface ActionPlan {
   approvedAt?: string | null;
   actions: ActionItem[];
   audit: AuditEntry[];
+  outcomeStatus?: OutcomeStatus;
+  outcomeNotes?: string;
+  outcomeRecordedAt?: string;
+  outcomeRecordedBy?: string;
+  outcomeEvidenceSource?: string;
+  decisionReceipt?: DecisionReceipt;
 }
 
 export interface Incident {
@@ -185,10 +261,10 @@ export const api = {
   getAssessments: (campusId: string) =>
     apiFetch<{ assessments: Assessment[] }>(`/assessments?campusId=${encodeURIComponent(campusId)}`),
 
-  createActionPlan: (assessmentId: string) =>
+  createActionPlan: (assessmentId: string, customAlternativeId?: string) =>
     apiFetch<ActionPlan>("/action-plans", {
       method: "POST",
-      body: JSON.stringify({ assessmentId }),
+      body: JSON.stringify({ assessmentId, customAlternativeId }),
     }),
 
   getActionPlans: (campusId: string) =>
@@ -211,6 +287,15 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ operation: "update_action", actionId, status }),
     }),
+
+  recordOutcome: (planId: string, outcomeStatus: OutcomeStatus, outcomeNotes: string, outcomeEvidenceSource?: string) =>
+    apiFetch<ActionPlan>(`/action-plans/${planId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ operation: "record_outcome", outcomeStatus, outcomeNotes, outcomeEvidenceSource }),
+    }),
+
+  getRecommendations: (assessmentId: string) =>
+    apiFetch<{ assessmentId: string; recommendations: ActionRecommendation[]; whatIfOptions: WhatIfOption[] }>(`/recommendations?assessmentId=${encodeURIComponent(assessmentId)}`),
 
   createIncident: (campusId: string, incidentType: IncidentType, description: string) =>
     apiFetch<Incident>("/incidents", {

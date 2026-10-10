@@ -53,10 +53,11 @@ export default function CommandCenter({
   };
 
   const confidence = useMemo(() => {
-    const evidenceHours = latest ? Object.values(latest.evidence).reduce((sum, e) => sum + e.hours, 0) : 0;
+    if (!latest) return { label: "Needs assessment", score: 35, tone: "text-[#94a3b8]", bar: "bg-[#64748b]" };
+    if (latest.status === "insufficient_data") return { label: "Insufficient data", score: 40, tone: "text-[#f87171]", bar: "bg-[#f87171]" };
+    const evidenceHours = Object.values(latest.evidence).reduce((sum, e) => sum + e.hours, 0);
     const warnings = air?.warnings.length ?? 0;
-    if (!latest || evidenceHours === 0) return { label: "Needs assessment", score: 35, tone: "text-[#94a3b8]", bar: "bg-[#64748b]" };
-    if (warnings > 1 || latest.status === "insufficient_data") return { label: "Limited coverage", score: 55, tone: "text-[#fbbf24]", bar: "bg-[#fbbf24]" };
+    if (evidenceHours === 0 || warnings > 1) return { label: "Limited coverage", score: 55, tone: "text-[#fbbf24]", bar: "bg-[#fbbf24]" };
     if (latest.dataMode === "observed") return { label: "Strong (Observed)", score: 92, tone: "text-[#34d399]", bar: "bg-[#34d399]" };
     return { label: "Decision-Ready (Forecast)", score: 80, tone: "text-[#2dd4bf]", bar: "bg-[#14b8a6]" };
   }, [air?.warnings.length, latest]);
@@ -154,7 +155,7 @@ export default function CommandCenter({
           <div className="p-5 md:p-6 bg-[#0b1322] flex flex-col justify-between">
             <div>
               <p className="text-[10px] text-[#64748b] uppercase tracking-widest font-bold mb-3">
-                Operational Telemetry
+                Data Readiness Score
               </p>
 
               <div className="flex items-end justify-between gap-4 mb-2">

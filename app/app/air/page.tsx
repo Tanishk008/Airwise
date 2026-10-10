@@ -4,21 +4,24 @@ import { useEffect, useState, useCallback } from "react";
 import { useApp } from "@/lib/context";
 import { api, AirQualityResponse, AirwiseApiError } from "@/lib/api";
 import { Card, ErrorCard, LoadingCard, WarnBanner, Disclaimer, SectionHeader, DataProvenance, Badge } from "@/components/ui/Card";
+import { DataQualityPanel } from "@/components/ui/DataQualityPanel";
 import { ForecastChart } from "@/components/charts/ForecastChart";
 import { fmtDate, pollutantLabel, getDataFreshness, clsx } from "@/lib/utils";
 import { motion } from "framer-motion";
-import { Wind, Database, RefreshCw, AlertOctagon, Info, ShieldAlert } from "lucide-react";
+import { Wind, Database, RefreshCw, AlertOctagon, Info } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
-const POLLUTANTS = ["pm2_5", "pm10", "nitrogen_dioxide", "ozone"];
+const POLLUTANTS = ["pm2_5", "pm10", "nitrogen_dioxide", "ozone", "sulphur_dioxide", "carbon_monoxide"];
 const POLL_COLORS: Record<string, string> = {
   pm2_5: "text-[#f87171]",
   pm10: "text-[#38bdf8]",
   nitrogen_dioxide: "text-[#a78bfa]",
   ozone: "text-[#34d399]",
+  sulphur_dioxide: "text-[#fb923c]",
+  carbon_monoxide: "text-[#fbbf24]",
 };
-const WHO_THRESHOLDS: Record<string, number> = { pm2_5: 15, pm10: 45 };
-const NAAQS_THRESHOLDS: Record<string, number> = { pm2_5: 60, pm10: 100 };
+const WHO_THRESHOLDS: Record<string, number> = { pm2_5: 15, pm10: 45, sulphur_dioxide: 40 };
+const NAAQS_THRESHOLDS: Record<string, number> = { pm2_5: 60, pm10: 100, sulphur_dioxide: 80 };
 
 function PollutantCard({ pollutant, currentValue, unit, dataMode, provider, time }: {
   pollutant: string;
@@ -140,8 +143,31 @@ export default function AirPage() {
   }, [selectedCampus]);
 
   useEffect(() => {
-    load();
-  }, [load, refreshKey]);
+    let active = true;
+    if (!selectedCampus) return;
+    const cid = selectedCampus.campusId;
+    
+    void (async () => {
+      await Promise.resolve();
+      if (!active) return;
+      setLoading(true);
+      setError(null);
+      api.airQuality(cid)
+        .then(res => {
+          if (active) setAir(res);
+        })
+        .catch(e => {
+          if (active) setError(e instanceof AirwiseApiError ? e.message : "Failed to load atmospheric intelligence");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    })();
+    
+    return () => {
+      active = false;
+    };
+  }, [selectedCampus, refreshKey]);
 
   if (!selectedCampus) return <div className="text-[#64748b] text-sm">Select a campus.</div>;
 
@@ -246,6 +272,11 @@ export default function AirPage() {
               showControls={true}
             />
           </Card>
+
+          {/* Trust Engine: Data Quality Panel */}
+          {air.dataQuality && (
+            <DataQualityPanel dataQuality={air.dataQuality} />
+          )}
 
           {/* Data Honesty Notice */}
           <div className="flex items-start gap-2.5 p-3 rounded-lg bg-[#0b1322] border border-[#1e2f4d] text-xs text-[#94a3b8]">

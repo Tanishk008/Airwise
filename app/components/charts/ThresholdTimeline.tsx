@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { ForecastPoint } from "@/lib/api";
 import { parseISO, format } from "date-fns";
 import { clsx } from "@/lib/utils";
@@ -11,30 +11,19 @@ interface ThresholdTimelineProps {
 }
 
 export function ThresholdTimeline({ forecast }: ThresholdTimelineProps) {
+  const [now] = useState(() => Date.now());
+
   const analysis = useMemo(() => {
-    const now = Date.now();
     const pm25Points = forecast
       .filter(f => f.pollutant === "pm2_5" && parseISO(f.time).getTime() >= now - 3600000)
       .slice(0, 24);
 
     if (!pm25Points.length) return null;
 
-    let maxVal = 0;
-    let maxHour = "";
-    let naaqsBreachCount = 0;
-    let whoBreachCount = 0;
-
     const timeline = pm25Points.map(pt => {
       const val = pt.value;
-      if (val > maxVal) {
-        maxVal = val;
-        maxHour = format(parseISO(pt.time), "HH:mm");
-      }
       const isNAAQS = val > 60;
       const isWHO = val > 15;
-      if (isNAAQS) naaqsBreachCount++;
-      else if (isWHO) whoBreachCount++;
-
       return {
         time: pt.time,
         label: format(parseISO(pt.time), "HH"),
@@ -44,14 +33,30 @@ export function ThresholdTimeline({ forecast }: ThresholdTimelineProps) {
       };
     });
 
+    let maxVal = 0;
+    let maxHour = "";
+    let naaqsBreachCount = 0;
+    let whoBreachCount = 0;
+
+    for (const pt of timeline) {
+      if (pt.value > maxVal) {
+        maxVal = pt.value;
+        maxHour = pt.fullLabel;
+      }
+      if (pt.value > 60) naaqsBreachCount++;
+      else if (pt.value > 15) whoBreachCount++;
+    }
+
     // Best outdoor window (lowest 3 consecutive hours)
-    let bestWindowStart = "";
+    let bestWindowStart = timeline[0]?.fullLabel ?? "N/A";
     let minWindowSum = Infinity;
-    for (let i = 0; i <= timeline.length - 3; i++) {
-      const sum = timeline[i].value + timeline[i + 1].value + timeline[i + 2].value;
-      if (sum < minWindowSum) {
-        minWindowSum = sum;
-        bestWindowStart = timeline[i].fullLabel;
+    if (timeline.length >= 3) {
+      for (let i = 0; i <= timeline.length - 3; i++) {
+        const sum = timeline[i].value + timeline[i + 1].value + timeline[i + 2].value;
+        if (sum < minWindowSum) {
+          minWindowSum = sum;
+          bestWindowStart = timeline[i].fullLabel;
+        }
       }
     }
 
@@ -63,7 +68,7 @@ export function ThresholdTimeline({ forecast }: ThresholdTimelineProps) {
       whoBreachCount,
       bestWindowStart,
     };
-  }, [forecast]);
+  }, [forecast, now]);
 
   if (!analysis) return null;
 

@@ -8,9 +8,10 @@ import { ForecastChart } from "@/components/charts/ForecastChart";
 import { ThresholdTimeline } from "@/components/charts/ThresholdTimeline";
 import AssessmentCard from "@/components/assessment/AssessmentCard";
 import CommandCenter from "@/components/dashboard/CommandCenter";
+import { DataQualityPanel } from "@/components/ui/DataQualityPanel";
 import { fmtRelative, statusConfig, clsx } from "@/lib/utils";
 import { motion } from "framer-motion";
-import { Activity, AlertTriangle, CheckCircle, TrendingUp, ArrowRight } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle, ArrowRight } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 export default function OverviewPage() {
@@ -28,10 +29,11 @@ export default function OverviewPage() {
     setLoading(true);
     setError(null);
     try {
+      const cid = selectedCampus.campusId;
       const [airData, assessData, planData] = await Promise.all([
-        api.airQuality(selectedCampus.campusId),
-        api.getAssessments(selectedCampus.campusId),
-        api.getActionPlans(selectedCampus.campusId),
+        api.airQuality(cid),
+        api.getAssessments(cid),
+        api.getActionPlans(cid),
       ]);
       setAir(airData);
       setAssessments(assessData.assessments);
@@ -44,8 +46,38 @@ export default function OverviewPage() {
   }, [selectedCampus]);
 
   useEffect(() => {
-    load();
-  }, [load, refreshKey]);
+    let active = true;
+    if (!selectedCampus) return;
+    const cid = selectedCampus.campusId;
+    
+    void (async () => {
+      await Promise.resolve();
+      if (!active) return;
+      setLoading(true);
+      setError(null);
+      Promise.all([
+        api.airQuality(cid),
+        api.getAssessments(cid),
+        api.getActionPlans(cid),
+      ])
+        .then(([airData, assessData, planData]) => {
+          if (!active) return;
+          setAir(airData);
+          setAssessments(assessData.assessments);
+          setPlans(planData.plans);
+        })
+        .catch(e => {
+          if (!active) return;
+          setError(e instanceof AirwiseApiError ? e.message : "Failed to load operational telemetry");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedCampus, refreshKey]);
 
   const handleQuickTaskUpdate = async (planId: string, actionId: string, status: ActionStatus) => {
     setUpdatingTaskId(actionId);
@@ -85,6 +117,12 @@ export default function OverviewPage() {
         latest={latest ?? null}
         plans={plans}
       />
+
+      {air?.dataQuality && (
+        <div className="mb-4">
+          <DataQualityPanel dataQuality={air.dataQuality} compact />
+        </div>
+      )}
 
       {/* Alert banner for action_recommended */}
       {latest?.status === "action_recommended" && (

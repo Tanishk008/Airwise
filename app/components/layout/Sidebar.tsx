@@ -13,6 +13,8 @@ import {
   Menu,
   X,
   Radio,
+  Beaker,
+  BookOpen,
 } from "lucide-react";
 import { useApp } from "@/lib/context";
 import { clsx } from "@/lib/utils";
@@ -23,6 +25,7 @@ const NAV = [
   { href: "/assessment", label: "Assessment", icon: ClipboardCheck },
   { href: "/response", label: "Response Centre", icon: ShieldAlert },
   { href: "/history", label: "Reports & History", icon: History },
+  { href: "/lab", label: "Forecast Lab", icon: Beaker },
 ];
 
 export default function Sidebar() {
@@ -154,6 +157,19 @@ function SidebarContent({
           Console
         </div>
         <NavLinks />
+        
+        <div className="px-3 py-1.5 mt-4 text-[10px] font-bold uppercase tracking-wider text-[#64748b]">
+          Resources
+        </div>
+        <a
+          href="/AIRWISE_User_Manual.pdf"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-semibold transition-all duration-200 group text-[#94a3b8] hover:text-[#f1f5f9] hover:bg-[#0f1a2e]"
+        >
+          <BookOpen size={16} className="text-[#64748b] transition-colors group-hover:text-[#94a3b8]" />
+          <span>User Manual (PDF)</span>
+        </a>
       </nav>
 
       {/* Closed loop helper footer */}

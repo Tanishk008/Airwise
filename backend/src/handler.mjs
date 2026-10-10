@@ -1,8 +1,10 @@
 // AIRWISE enhanced handler with OpenAQ integration and QueryCommand (GSI)
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand, GetCommand, QueryCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { assess, ACTIVITIES } from "./engine.mjs";
+import { assessDataQuality } from "./data-quality.mjs";
+import { generateRecommendations, getWhatIfOptions } from "./action-intelligence.mjs";
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}), { removeUndefinedValues: true });
 const T = {
@@ -54,6 +56,13 @@ class HttpError extends Error {
     super(m);
     Object.assign(this, { s, code, retryable });
   }
+}
+
+function stableStringify(obj) {
+  if (obj === null || typeof obj !== "object") return JSON.stringify(obj);
+  if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
 }
 
 // Query with GSI if available; fall back to scan for resilience
@@ -109,13 +118,13 @@ async function campusOr404(cid) {
 // Open-Meteo forecast
 async function fetchOpenMeteo(campus) {
   const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${campus.latitude}&longitude=${campus.longitude}` +
-    `&hourly=pm2_5,pm10,nitrogen_dioxide,ozone&current=pm2_5,pm10,us_aqi&timezone=UTC&forecast_days=3`;
+    `&hourly=pm2_5,pm10,nitrogen_dioxide,ozone,sulphur_dioxide,carbon_monoxide&current=pm2_5,pm10,us_aqi&timezone=UTC&forecast_days=3`;
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     const forecast = [];
-    for (const p of ["pm2_5", "pm10", "nitrogen_dioxide", "ozone"]) {
+    for (const p of ["pm2_5", "pm10", "nitrogen_dioxide", "ozone", "sulphur_dioxide", "carbon_monoxide"]) {
       (j.hourly?.[p] || []).forEach((v, i) => {
         if (v !== null && Number.isFinite(v)) {
           forecast.push({
@@ -188,7 +197,6 @@ async function fetchAir(campus) {
   ]);
 
   if (meteoResult.status === "rejected") {
-    // If Open-Meteo itself fails, propagate as 502
     throw meteoResult.reason;
   }
 
@@ -197,20 +205,28 @@ async function fetchAir(campus) {
     ? aqResult.value
     : { observations: [], warnings: ["OpenAQ data unavailable."] };
 
-  const warnings = [
+  const baseWarnings = [
     ...aqWarnings,
     ...(observations.length === 0
       ? ["No measured station observation is shown. All displayed values are MODELLED FORECASTS (CAMS model), not sensor readings."]
       : []),
   ];
 
+  const retrievedAt = now();
+  const dataQuality = assessDataQuality({
+    forecast, observations, retrievedAt,
+    sourceName: observations.length > 0 ? "OpenAQ + Open-Meteo Air Quality (CAMS)" : "Open-Meteo Air Quality (CAMS model)",
+    existingWarnings: baseWarnings,
+  });
+
   return {
     campusId: campus.campusId,
-    retrievedAt: now(),
+    retrievedAt,
     observations,
     forecast,
     modelledCurrent,
-    warnings,
+    warnings: dataQuality.warnings,
+    dataQuality,
   };
 }
 
@@ -225,6 +241,9 @@ const routes = {
     }
     const air = await fetchAir(c);
     const r = assess({ forecast: air.forecast, activity: b.activity });
+    const dataQuality = air.dataQuality || assessDataQuality({ forecast: air.forecast, observations: air.observations, retrievedAt: air.retrievedAt });
+    const tempAssessment = { ...r, assessmentId: "pending", activity: b.activity };
+    const recommendations = generateRecommendations({ assessment: tempAssessment, dataQuality });
     const item = {
       assessmentId: gid("asmt"),
       campusId: c.campusId,
@@ -234,17 +253,58 @@ const routes = {
       sourceName: air.observations.length > 0 ? "OpenAQ + Open-Meteo" : "Open-Meteo Air Quality",
       sourceTimestamp: air.retrievedAt,
       disclaimer: "Decision support only; not medical advice or an official alert.",
+      dataQuality,
+      recommendations,
       ...r,
     };
+    item.recommendations = item.recommendations.map(rec => ({ ...rec, sourceAssessmentId: item.assessmentId }));
     await put(T.a, item);
     return [201, item];
   },
   "GET /assessments": async q => [200, { assessments: await scan(T.a, q.campusId) }],
   "POST /action-plans": async (_, b) => {
-    const a = await get(T.a, { assessmentId: clean(b.assessmentId, 40) });
+    const { assessmentId, customAlternativeId } = b;
+    const a = await get(T.a, { assessmentId: clean(assessmentId, 40) });
     if (!a) throw new HttpError(404, "ASSESSMENT_NOT_FOUND", "Unknown assessmentId.");
-    if (!a.recommendedActions?.length) throw new HttpError(400, "NO_ACTIONS", "Assessment has no actions to plan.");
+    
+    let actions = [];
+    if (customAlternativeId) {
+      const recs = a.recommendations || [];
+      let mappedScenarioId = null;
+      if (customAlternativeId === "move_indoors") mappedScenarioId = "move_activity_indoors";
+      else if (customAlternativeId === "reschedule" || customAlternativeId === "reassess") mappedScenarioId = "reschedule_to_lower_risk_window";
+      else if (customAlternativeId === "proceed" || customAlternativeId === "reduce") mappedScenarioId = "continue_with_monitoring";
+      
+      const customRec = recs.find(r => r.id === mappedScenarioId) || recs[0];
+      if (customRec && customRec.suggestedSteps) {
+        actions = customRec.suggestedSteps.map((step, i) => ({ actionId: `act_${i + 1}`, label: step, owner: customRec.assignedRole, status: "pending", completedAt: null }));
+      } else {
+        actions = [{ actionId: "act_1", label: `Implement alternative: ${customAlternativeId.replace(/_/g, " ")}`, owner: "Campus Administrator", status: "pending", completedAt: null }];
+      }
+    } else {
+      if (!a.recommendedActions?.length) throw new HttpError(400, "NO_ACTIONS", "Assessment has no actions to plan.");
+      actions = a.recommendedActions.map((x, i) => ({ actionId: `act_${i + 1}`, label: x.label, owner: x.owner, status: "pending", completedAt: null }));
+    }
+
     const t = now();
+    
+    const receiptPayload = {
+      assessmentId: a.assessmentId,
+      campusId: a.campusId,
+      activity: a.activity,
+      assessmentTimestamp: a.createdAt,
+      evidence: a.evidence,
+      dataQuality: a.dataQuality,
+      selectedAlternative: customAlternativeId || 'Top Recommendation',
+      actions: actions.map(x => x.label)
+    };
+    const hash = createHash("sha256").update(stableStringify(receiptPayload)).digest("hex");
+    const decisionReceipt = {
+      ...receiptPayload,
+      generatedAt: t,
+      hash
+    };
+
     const plan = {
       planId: gid("plan"),
       assessmentId: a.assessmentId,
@@ -253,14 +313,9 @@ const routes = {
       createdAt: t,
       updatedAt: t,
       approvedBy: null,
-      actions: a.recommendedActions.map((x, i) => ({
-        actionId: `act_${i + 1}`,
-        label: x.label,
-        owner: x.owner,
-        status: "pending",
-        completedAt: null,
-      })),
-      audit: [{ at: t, by: "system", event: `Draft created from ${a.assessmentId} (${a.status})` }],
+      actions,
+      decisionReceipt,
+      audit: [{ at: t, by: "system", event: `Draft created from ${a.assessmentId} (${customAlternativeId ? `Alternative: ${customAlternativeId}` : 'Top Recommendation'})` }],
     };
     await put(T.p, plan);
     return [201, plan];
@@ -277,6 +332,8 @@ const routes = {
     } else if (b.operation === "dismiss_plan") {
       if (p.status !== "draft") throw new HttpError(400, "INVALID_TRANSITION", "Only draft plans can be dismissed.");
       p.status = "dismissed";
+      p.dismissedBy = by;
+      p.dismissedAt = t;
       const reason = clean(b.reason, 200);
       p.audit.push({ at: t, by, event: reason ? `Plan dismissed: ${reason}` : "Plan dismissed" });
     } else if (b.operation === "update_action") {
@@ -290,12 +347,40 @@ const routes = {
       a.status = b.status;
       a.completedAt = b.status === "completed" ? t : null;
       if (p.actions.every(x => x.status === "completed")) p.status = "completed";
+    } else if (b.operation === "record_outcome") {
+      if (!['completed', 'approved', 'dismissed'].includes(p.status)) {
+        throw new HttpError(400, "INVALID_TRANSITION", "Outcome can only be recorded for completed, approved, or dismissed plans.");
+      }
+      const validOutcomes = ["improved", "unchanged", "worsened", "unable_to_determine"];
+      const outcomeStatus = clean(b.outcomeStatus, 40);
+      if (!validOutcomes.includes(outcomeStatus)) {
+        throw new HttpError(400, "INVALID_OUTCOME", `outcomeStatus must be one of: ${validOutcomes.join(", ")}.`);
+      }
+      p.outcomeStatus = outcomeStatus;
+      p.outcomeNotes = clean(b.outcomeNotes || "", 500);
+      p.outcomeRecordedAt = t;
+      p.outcomeRecordedBy = by;
+      p.outcomeEvidenceSource = clean(b.outcomeEvidenceSource || "", 200);
+      p.audit.push({ at: t, by, event: `Outcome recorded: ${outcomeStatus}${p.outcomeNotes ? " — " + p.outcomeNotes.slice(0, 80) : ""}` });
     } else {
       throw new HttpError(400, "INVALID_OPERATION", "Unsupported operation.");
     }
     p.updatedAt = t;
     await put(T.p, p);
     return [200, p];
+  },
+  "POST /verify-receipt": async (_, b) => {
+    const { receipt } = b;
+    if (!receipt || !receipt.hash) throw new HttpError(400, "INVALID_RECEIPT", "Receipt or hash missing.");
+    
+    const { hash, generatedAt, ...payload } = receipt;
+    const computedHash = createHash("sha256").update(stableStringify(payload)).digest("hex");
+    
+    if (computedHash === hash) {
+      return [200, { valid: true, message: "Receipt cryptographically verified and untampered." }];
+    } else {
+      return [200, { valid: false, message: "Receipt tampering detected. Hash mismatch." }];
+    }
   },
   "POST /incidents": async (_, b) => {
     const c = await campusOr404(b.campusId);
@@ -314,6 +399,15 @@ const routes = {
     return [201, item];
   },
   "GET /incidents": async q => [200, { incidents: await scan(T.i, q.campusId) }],
+  "GET /recommendations": async q => {
+    const { assessmentId } = q;
+    if (!assessmentId) throw new HttpError(400, "MISSING_PARAM", "assessmentId is required.");
+    const assessment = await get(T.a, { assessmentId: clean(assessmentId, 40) });
+    if (!assessment) throw new HttpError(404, "ASSESSMENT_NOT_FOUND", "Unknown assessmentId.");
+    const recommendations = assessment.recommendations || [];
+    const whatIfOptions = getWhatIfOptions(assessment, assessment.dataQuality);
+    return [200, { assessmentId, recommendations, whatIfOptions }];
+  },
 };
 
 export const handler = async event => {

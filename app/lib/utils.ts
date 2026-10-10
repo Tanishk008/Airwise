@@ -25,6 +25,16 @@ export function fmtDuration(ms: number): string {
   return rem ? `${hr}h ${rem}m` : `${hr}h`;
 }
 
+export function fmtOutcomeStatus(status: string): string {
+  switch (status) {
+    case "improved": return "Measured Impact: Air Quality Improved";
+    case "unchanged": return "Measured Impact: No Significant Change";
+    case "worsened": return "Measured Impact: Air Quality Worsened";
+    case "unable_to_determine": return "Operational Outcome Only (Impact Unverified)";
+    default: return status.replace(/_/g, " ");
+  }
+}
+
 export const statusConfig: Record<AssessmentStatus, { label: string; color: string; bg: string; icon: string }> = {
   insufficient_data: {
     label: "Insufficient Data",

@@ -2,9 +2,9 @@
 
 import { Assessment } from "@/lib/api";
 import { statusConfig, fmtDate, pollutantLabel, clsx } from "@/lib/utils";
-import { Card, Badge, Button, DataProvenance, Disclaimer } from "@/components/ui/Card";
+import { Badge, Button, DataProvenance } from "@/components/ui/Card";
 import { motion, AnimatePresence } from "framer-motion";
-import { Info, ChevronDown, ChevronUp, ShieldAlert, ArrowRight, UserCheck } from "lucide-react";
+import { Info, ChevronDown, ChevronUp, ShieldAlert, UserCheck } from "lucide-react";
 import { useState } from "react";
 
 interface AssessmentCardProps {

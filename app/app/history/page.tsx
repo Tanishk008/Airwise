@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useApp } from "@/lib/context";
 import { api, Assessment, ActionPlan, Incident, IncidentType, AirwiseApiError } from "@/lib/api";
 import { Card, ErrorCard, LoadingCard, SectionHeader, Button, Badge, WarnBanner, Disclaimer } from "@/components/ui/Card";
 import AssessmentCard from "@/components/assessment/AssessmentCard";
-import { fmtDate, statusConfig, fmtDuration, clsx } from "@/lib/utils";
+import { fmtDate, statusConfig, fmtDuration, clsx, fmtOutcomeStatus } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
-import { AlertOctagon, TrendingUp, Download, Search, Filter, Eye, X, CheckCircle2 } from "lucide-react";
+import { AlertOctagon, TrendingUp, Download, Search, Eye, X, FileText } from "lucide-react";
 
 const INCIDENT_ICONS: Record<IncidentType, string> = {
   smoke: "🔥",
@@ -28,6 +28,7 @@ export default function HistoryPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activityFilter, setActivityFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [planOutcomeFilter, setPlanOutcomeFilter] = useState("all");
 
   // Assessment Inspection Modal
   const [inspectAssessment, setInspectAssessment] = useState<Assessment | null>(null);
@@ -60,8 +61,37 @@ export default function HistoryPage() {
   }, [selectedCampus]);
 
   useEffect(() => {
-    load();
-  }, [load, refreshKey]);
+    let active = true;
+    if (!selectedCampus) return;
+    
+    void (async () => {
+      await Promise.resolve();
+      if (!active) return;
+      setLoading(true);
+      setError(null);
+      Promise.all([
+        api.getAssessments(selectedCampus.campusId),
+        api.getActionPlans(selectedCampus.campusId),
+        api.getIncidents(selectedCampus.campusId),
+      ])
+        .then(([aData, pData, iData]) => {
+          if (!active) return;
+          setAssessments(aData.assessments);
+          setPlans(pData.plans);
+          setIncidents(iData.incidents);
+        })
+        .catch(e => {
+          if (!active) return;
+          setError(e instanceof AirwiseApiError ? e.message : "Failed to load historical archives");
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedCampus, refreshKey]);
 
   const submitIncident = async () => {
     if (!selectedCampus || !incDesc.trim()) return;
@@ -118,6 +148,14 @@ export default function HistoryPage() {
     return true;
   });
 
+  const filteredPlans = plans.filter(p => {
+    if (planOutcomeFilter === "all") return true;
+    if (planOutcomeFilter === "measured") return p.outcomeStatus && p.outcomeStatus !== "unable_to_determine";
+    if (planOutcomeFilter === "operational") return p.outcomeStatus === "unable_to_determine";
+    if (planOutcomeFilter === "pending") return !p.outcomeStatus;
+    return true;
+  });
+
   // Metrics
   const allActions = plans.flatMap(p => p.actions);
   const completedActions = allActions.filter(a => a.status === "completed");
@@ -125,6 +163,8 @@ export default function HistoryPage() {
   const avgResponseMs = approvedPlans.length
     ? approvedPlans.reduce((s, p) => s + (new Date(p.approvedAt!).getTime() - new Date(p.createdAt).getTime()), 0) / approvedPlans.length
     : null;
+  const outcomesLogged = plans.filter(p => p.outcomeStatus).length;
+  const eligibleForOutcome = plans.filter(p => ["completed", "dismissed"].includes(p.status)).length;
 
   // Status distribution for chart
   const statusDist = [
@@ -161,7 +201,7 @@ export default function HistoryPage() {
       {!loading && !error && (
         <>
           {/* Metrics row */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
             <Card className="border-[#1e2f4d] bg-[#0f1a2e]">
               <p className="text-[11px] text-[#94a3b8] uppercase tracking-wider font-semibold mb-1">Total Assessments</p>
               <p className="text-2xl md:text-3xl font-bold mono text-[#f1f5f9]">{assessments.length}</p>
@@ -176,6 +216,12 @@ export default function HistoryPage() {
               <p className="text-[11px] text-[#94a3b8] uppercase tracking-wider font-semibold mb-1">Avg. Sign-Off Latency</p>
               <p className="text-2xl md:text-3xl font-bold mono text-[#38bdf8]">
                 {avgResponseMs !== null ? fmtDuration(avgResponseMs) : "—"}
+              </p>
+            </Card>
+            <Card className="border-[#1e2f4d] bg-[#0f1a2e]">
+              <p className="text-[11px] text-[#94a3b8] uppercase tracking-wider font-semibold mb-1">Outcomes Logged</p>
+              <p className="text-2xl md:text-3xl font-bold mono text-[#a78bfa]">
+                {outcomesLogged}<span className="text-[#64748b] text-sm">/{eligibleForOutcome}</span>
               </p>
             </Card>
             <Card className="border-[#1e2f4d] bg-[#0f1a2e]">
@@ -300,6 +346,64 @@ export default function HistoryPage() {
                         </tr>
                       );
                     })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          {/* Action Plan Outcomes Table */}
+          <Card className="border-[#1e2f4d] bg-[#0f1a2e]">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+              <p className="text-xs text-[#94a3b8] uppercase tracking-wider font-semibold flex items-center gap-2">
+                <FileText size={14} className="text-[#38bdf8]" />
+                Action Plan & Outcomes Archive ({filteredPlans.length})
+              </p>
+              
+              <div className="flex items-center gap-2">
+                <select
+                  value={planOutcomeFilter}
+                  onChange={e => setPlanOutcomeFilter(e.target.value)}
+                  className="bg-[#0b1322] border border-[#1e2f4d] text-xs text-[#f1f5f9] rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-[#14b8a6]"
+                >
+                  <option value="all">All Plans</option>
+                  <option value="measured">Measured Environmental Impact</option>
+                  <option value="operational">Operational Outcome Only</option>
+                  <option value="pending">Pending Outcome</option>
+                </select>
+              </div>
+            </div>
+
+            {filteredPlans.length === 0 ? (
+              <p className="text-[#64748b] text-xs text-center py-6">No action plans match your filter criteria.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left">
+                  <thead className="border-b border-[#1e2f4d] text-[#64748b]">
+                    <tr>
+                      <th className="py-2.5 px-3 font-semibold">Plan ID</th>
+                      <th className="py-2.5 px-3 font-semibold">Created</th>
+                      <th className="py-2.5 px-3 font-semibold">Status</th>
+                      <th className="py-2.5 px-3 font-semibold">Outcome Impact</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#1e2f4d]/50">
+                    {filteredPlans.map(p => (
+                      <tr key={p.planId} className="hover:bg-[#15233d]/40 transition-colors">
+                        <td className="py-2 px-3 text-[#cbd5e1] font-mono font-bold">{p.planId}</td>
+                        <td className="py-2 px-3 text-[#94a3b8] mono">{fmtDate(p.createdAt)}</td>
+                        <td className="py-2 px-3 capitalize">{p.status}</td>
+                        <td className="py-2 px-3">
+                          {p.outcomeStatus ? (
+                            <Badge variant={p.outcomeStatus === "unable_to_determine" ? "amber" : "blue"}>
+                              {fmtOutcomeStatus(p.outcomeStatus)}
+                            </Badge>
+                          ) : (
+                            <span className="text-[#64748b] italic">Pending</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>

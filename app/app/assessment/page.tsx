@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "@/lib/context";
-import { api, Assessment, ActivityType, AirwiseApiError } from "@/lib/api";
+import { api, Assessment, ActivityType, AirwiseApiError, ActionRecommendation, WhatIfOption } from "@/lib/api";
 import { Card, LoadingCard, SectionHeader, Button, Disclaimer, WarnBanner, Badge } from "@/components/ui/Card";
 import AssessmentCard from "@/components/assessment/AssessmentCard";
+import { DataQualityPanel } from "@/components/ui/DataQualityPanel";
+import { DecisionSimulator } from "@/components/ui/DecisionSimulator";
 import { fmtDate, statusConfig, clsx } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
-import { ClipboardCheck, Dumbbell, Users, HardHat, ChevronRight, Scale, ShieldCheck, CheckCircle2, AlertTriangle, X } from "lucide-react";
+import { ClipboardCheck, Dumbbell, Users, HardHat, ChevronRight, Scale, ShieldCheck, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 const ACTIVITY_OPTIONS: { value: ActivityType; label: string; desc: string; role: string; icon: React.ReactNode }[] = [
@@ -45,29 +47,68 @@ export default function AssessmentPage() {
   const [error, setError] = useState<string | null>(null);
   const [assessError, setAssessError] = useState<string | null>(null);
 
+  // Intelligence
+  const [recommendations, setRecommendations] = useState<ActionRecommendation[]>([]);
+  const [whatIfOptions, setWhatIfOptions] = useState<WhatIfOption[]>([]);
+  const [fetchingRecs, setFetchingRecs] = useState(false);
+
   // Confirmation Modal state for plan creation
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const [targetAssessmentId, setTargetAssessmentId] = useState<string | null>(null);
 
   const router = useRouter();
 
-  const loadHistory = useCallback(async () => {
-    if (!selectedCampus) return;
-    setLoadingHistory(true);
-    try {
-      const { assessments } = await api.getAssessments(selectedCampus.campusId);
-      setHistory(assessments);
-      setLatest(prev => prev ?? assessments[0] ?? null);
-    } catch (e) {
-      setError(e instanceof AirwiseApiError ? e.message : "Failed to load assessment history");
-    } finally {
-      setLoadingHistory(false);
-    }
-  }, [selectedCampus]);
+
 
   useEffect(() => {
-    loadHistory();
-  }, [loadHistory, refreshKey]);
+    let active = true;
+    if (!selectedCampus) return;
+    
+    void (async () => {
+      await Promise.resolve();
+      if (!active) return;
+      setLoadingHistory(true);
+      setError(null);
+      api.getAssessments(selectedCampus.campusId)
+        .then(({ assessments }) => {
+          if (!active) return;
+          setHistory(assessments);
+          setLatest(assessments[0] ?? null);
+        })
+        .catch(e => {
+          if (!active) return;
+          setError(e instanceof AirwiseApiError ? e.message : "Failed to load assessment history");
+        })
+        .finally(() => {
+          if (active) setLoadingHistory(false);
+        });
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedCampus, refreshKey]);
+
+  useEffect(() => {
+    if (!latest) return;
+    let active = true;
+    void (async () => {
+      await Promise.resolve();
+      if (!active) return;
+      setFetchingRecs(true);
+      api.getRecommendations(latest.assessmentId)
+        .then(res => {
+          if (active) {
+            setRecommendations(res.recommendations);
+            setWhatIfOptions(res.whatIfOptions);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (active) setFetchingRecs(false);
+        });
+    })();
+    return () => { active = false; };
+  }, [latest]);
 
   const runAssessment = async () => {
     if (!selectedCampus) return;
@@ -85,8 +126,11 @@ export default function AssessmentPage() {
     }
   };
 
-  const handleOpenPlanConfirm = (assessmentId: string) => {
+  const [selectedAlternativeId, setSelectedAlternativeId] = useState<string | null>(null);
+
+  const handleOpenPlanConfirm = (assessmentId: string, customAlternativeId?: string) => {
     setTargetAssessmentId(assessmentId);
+    setSelectedAlternativeId(customAlternativeId || null);
     setConfirmModalOpen(true);
   };
 
@@ -94,12 +138,13 @@ export default function AssessmentPage() {
     if (!targetAssessmentId) return;
     setCreatingPlan(true);
     try {
-      const plan = await api.createActionPlan(targetAssessmentId);
+      await api.createActionPlan(targetAssessmentId, selectedAlternativeId || undefined);
       setConfirmModalOpen(false);
       refresh();
       router.push("/response");
     } catch (e) {
       setAssessError(e instanceof AirwiseApiError ? e.message : "Could not create response plan");
+    } finally {
       setCreatingPlan(false);
     }
   };
@@ -233,6 +278,23 @@ export default function AssessmentPage() {
                 onCreatePlan={handleOpenPlanConfirm}
                 creatingPlan={creatingPlan}
               />
+              
+              {latest.dataQuality && (
+                <div className="mt-4">
+                  <DataQualityPanel dataQuality={latest.dataQuality} />
+                </div>
+              )}
+
+              {fetchingRecs ? (
+                <div className="mt-4"><LoadingCard /></div>
+              ) : (
+                <DecisionSimulator
+                  assessment={latest}
+                  recommendations={recommendations}
+                  whatIfOptions={whatIfOptions}
+                  onApply={(rec, customOpt) => handleOpenPlanConfirm(latest.assessmentId, customOpt)}
+                />
+              )}
             </div>
           </motion.div>
         )}

@@ -13,7 +13,7 @@
 
 import express from "express";
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 
 const PORT = 3001;
 const app = express();
@@ -31,59 +31,12 @@ app.use((req, res, next) => {
 // ─── In-memory store ──────────────────────────────────────────────────────────
 const db = { campuses: new Map(), assessments: new Map(), plans: new Map(), incidents: new Map() };
 
-// ─── Risk engine (mirrors backend/src/engine.mjs) ─────────────────────────────
-const GUIDELINES = {
-  version: "WHO-AQG-2021 + India-CPCB-NAAQS-2009",
-  pm2_5: { who: 15, naaqs: 60 },
-  pm10: { who: 45, naaqs: 100 },
-  unit: "µg/m³",
-};
-const ACTIVITIES = ["outdoor_sports", "assembly", "outdoor_work"];
-const ACTIONS = {
-  outdoor_sports: [
-    ["REVIEW_OUTDOOR_ACTIVITY", "Review / move outdoor sports session indoors", "Sports coordinator"],
-    ["SEND_ADVISORY", "Prepare campus advisory for students and staff", "Campus administrator"],
-  ],
-  assembly: [
-    ["MOVE_ASSEMBLY", "Review holding the assembly indoors or shortening it", "Campus administrator"],
-    ["CHECK_VENTILATION", "Check ventilation / air purification in indoor venues", "Facilities coordinator"],
-  ],
-  outdoor_work: [
-    ["REVIEW_WORK_SCHEDULE", "Review outdoor work schedule and rotate / limit exposure", "Facilities coordinator"],
-    ["CHECK_MASKS", "Check availability of respiratory protection for staff", "Facilities coordinator"],
-  ],
-};
-
-function assess({ forecast, activity, nowMs = Date.now() }) {
-  const reasons = [], evidence = {};
-  for (const p of ["pm2_5", "pm10"]) {
-    const pts = forecast.filter(
-      f => f.pollutant === p && Number.isFinite(f.value) && f.value >= 0 &&
-        Date.parse(f.time) >= nowMs - 3600e3 && Date.parse(f.time) < nowMs + 24 * 3600e3
-    );
-    if (pts.length < 18) {
-      reasons.push({ code: "INSUFFICIENT_" + p.toUpperCase(), message: `Only ${pts.length}/24 valid hourly ${p} values available.` });
-      continue;
-    }
-    const mean = +(pts.reduce((s, x) => s + x.value, 0) / pts.length).toFixed(1);
-    const max = Math.max(...pts.map(x => x.value));
-    evidence[p] = { mean24h: mean, max, hours: pts.length, unit: GUIDELINES.unit, dataMode: "forecast", provider: pts[0].provider, firstTime: pts[0].time, lastTime: pts.at(-1).time };
-    const g = GUIDELINES[p];
-    if (mean > g.naaqs) reasons.push({ code: p.toUpperCase() + "_ABOVE_NAAQS", message: `Forecast ${p} 24h mean ${mean} ${GUIDELINES.unit} exceeds India CPCB 24h standard (${g.naaqs}).` });
-    else if (mean > g.who) reasons.push({ code: p.toUpperCase() + "_ABOVE_WHO", message: `Forecast ${p} 24h mean ${mean} ${GUIDELINES.unit} exceeds WHO 2021 24h guideline (${g.who}).` });
-  }
-  const has = Object.keys(evidence).length > 0;
-  const level = c => reasons.some(r => r.code.endsWith(c));
-  const status = !has ? "insufficient_data" : level("_ABOVE_NAAQS") ? "action_recommended" : level("_ABOVE_WHO") ? "review_required" : "monitor";
-  if (status === "monitor") reasons.push({ code: "NO_TRIGGER", message: "No configured threshold exceeded. This is not a statement that the air is safe." });
-  const recommendedActions = status === "monitor"
-    ? [["CONTINUE_MONITORING", "Continue routine monitoring", "Campus administrator"]]
-    : status === "insufficient_data" ? [] : ACTIONS[activity];
-  return {
-    status, reasons, evidence, guidelineVersion: GUIDELINES.version,
-    recommendedActions: (recommendedActions || []).map(([code, label, owner]) => ({ code, label, owner, requiresApproval: true })),
-  };
-}
+// ─── Risk engine (imported from backend/src/engine.mjs) ───────────────────────
+import { assess, ACTIVITIES, ACTIONS, GUIDELINES } from "./src/engine.mjs";
+// ─── Trust Engine: Data Quality ───────────────────────────────────────────────
+import { assessDataQuality } from "./src/data-quality.mjs";
+// ─── Action Intelligence ──────────────────────────────────────────────────────
+import { generateRecommendations, getWhatIfOptions } from "./src/action-intelligence.mjs";
 
 // ─── Campus seed data ─────────────────────────────────────────────────────────
 const SEED_CAMPUSES = [
@@ -101,6 +54,13 @@ const clean = (s, n = 300) => String(s ?? "").replace(/[<>]/g, "").trim().slice(
 const byNew = arr => [...arr].sort((a, b) => (b.createdAt || b.reportedAt || "").localeCompare(a.createdAt || a.reportedAt || ""));
 const err = (res, status, code, message, retryable = false) => res.status(status).json({ error: { code, message, retryable } });
 
+function stableStringify(obj) {
+  if (obj === null || typeof obj !== "object") return JSON.stringify(obj);
+  if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+}
+
 function getCampus(campusId, res) {
   const c = db.campuses.get(campusId);
   if (!c) { err(res, 404, "CAMPUS_NOT_FOUND", "Unknown campusId."); return null; }
@@ -111,12 +71,12 @@ function getCampus(campusId, res) {
 async function fetchForecast(campus) {
   const url = `https://air-quality-api.open-meteo.com/v1/air-quality` +
     `?latitude=${campus.latitude}&longitude=${campus.longitude}` +
-    `&hourly=pm2_5,pm10,nitrogen_dioxide,ozone&current=pm2_5,pm10,us_aqi&timezone=UTC&forecast_days=3`;
+    `&hourly=pm2_5,pm10,nitrogen_dioxide,ozone,sulphur_dioxide,carbon_monoxide&current=pm2_5,pm10,us_aqi&timezone=UTC&forecast_days=3`;
   const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
   if (!r.ok) throw new Error(`Open-Meteo HTTP ${r.status}`);
   const j = await r.json();
   const forecast = [];
-  for (const p of ["pm2_5", "pm10", "nitrogen_dioxide", "ozone"]) {
+  for (const p of ["pm2_5", "pm10", "nitrogen_dioxide", "ozone", "sulphur_dioxide", "carbon_monoxide"]) {
     (j.hourly?.[p] || []).forEach((v, i) => {
       if (v !== null && Number.isFinite(v)) {
         forecast.push({ time: j.hourly.time[i] + ":00Z", pollutant: p, value: v, unit: j.hourly_units?.[p] || "µg/m³", dataMode: "forecast", provider: "Open-Meteo Air Quality (CAMS model)" });
@@ -141,12 +101,20 @@ app.get("/api/v1/campuses", (_, res) => res.json({ campuses: [...db.campuses.val
 app.get("/api/v1/air-quality", async (req, res) => {
   const campus = getCampus(req.query.campusId, res); if (!campus) return;
   try {
+    const retrievedAt = now();
     const { forecast, modelledCurrent } = await fetchForecast(campus);
+    const baseWarnings = ["No measured station observation shown — all values are MODELLED FORECASTS (CAMS model). Running in local dev mode."];
+    const dataQuality = assessDataQuality({
+      forecast, observations: [], retrievedAt,
+      sourceName: "Open-Meteo Air Quality (CAMS model) · Local Dev",
+      existingWarnings: baseWarnings,
+    });
     res.json({
-      campusId: campus.campusId, retrievedAt: now(),
+      campusId: campus.campusId, retrievedAt,
       observations: [],
       forecast, modelledCurrent,
-      warnings: ["No measured station observation shown — all values are MODELLED FORECASTS (CAMS model). Running in local dev mode."],
+      warnings: dataQuality.warnings,
+      dataQuality,
     });
   } catch (e) {
     console.error("Open-Meteo error:", e.message);
@@ -159,15 +127,22 @@ app.post("/api/v1/assessments", async (req, res) => {
   const { campusId, activity } = req.body;
   const campus = getCampus(campusId, res); if (!campus) return;
   if (!ACTIVITIES.includes(activity)) return err(res, 400, "INVALID_ACTIVITY", `activity must be one of ${ACTIVITIES.join(", ")}.`);
-  let forecast = [];
+  let forecast = [], retrievedAt = now();
   try { ({ forecast } = await fetchForecast(campus)); }
   catch (e) { return err(res, 502, "UPSTREAM_DATA_UNAVAILABLE", "Could not fetch air data.", true); }
+  retrievedAt = now();
   const r = assess({ forecast, activity });
+  const dataQuality = assessDataQuality({ forecast, observations: [], retrievedAt, sourceName: "Open-Meteo Air Quality (local dev)" });
+  const recommendations = generateRecommendations({ assessment: { ...r, assessmentId: "pending", activity }, dataQuality });
   const item = {
     assessmentId: uid("asmt"), campusId, activity, createdAt: now(),
     dataMode: "forecast", sourceName: "Open-Meteo Air Quality (local dev)",
-    sourceTimestamp: now(), disclaimer: "Decision support only.", ...r,
+    sourceTimestamp: retrievedAt, disclaimer: "Decision support only; not medical advice or an official alert.",
+    dataQuality, recommendations,
+    ...r,
   };
+  // Fix recommendation sourceAssessmentId now that we have the ID
+  item.recommendations = item.recommendations.map(rec => ({ ...rec, sourceAssessmentId: item.assessmentId }));
   db.assessments.set(item.assessmentId, item);
   res.status(201).json(item);
 });
@@ -181,16 +156,54 @@ app.get("/api/v1/assessments", (req, res) => {
 
 // Create action plan
 app.post("/api/v1/action-plans", (req, res) => {
-  const { assessmentId } = req.body;
+  const { assessmentId, customAlternativeId } = req.body;
   const a = db.assessments.get(clean(assessmentId, 40));
   if (!a) return err(res, 404, "ASSESSMENT_NOT_FOUND", "Unknown assessmentId.");
-  if (!a.recommendedActions?.length) return err(res, 400, "NO_ACTIONS", "Assessment has no actions to plan.");
+  
+  let actions = [];
+  if (customAlternativeId) {
+    const recs = a.recommendations || [];
+    let mappedScenarioId = null;
+    if (customAlternativeId === "move_indoors") mappedScenarioId = "move_activity_indoors";
+    else if (customAlternativeId === "reschedule" || customAlternativeId === "reassess") mappedScenarioId = "reschedule_to_lower_risk_window";
+    else if (customAlternativeId === "proceed" || customAlternativeId === "reduce") mappedScenarioId = "continue_with_monitoring";
+    
+    const customRec = recs.find(r => r.id === mappedScenarioId) || recs[0];
+    if (customRec && customRec.suggestedSteps) {
+      actions = customRec.suggestedSteps.map((step, i) => ({ actionId: `act_${i + 1}`, label: step, owner: customRec.assignedRole, status: "pending", completedAt: null }));
+    } else {
+      actions = [{ actionId: "act_1", label: `Implement alternative: ${customAlternativeId.replace(/_/g, " ")}`, owner: "Campus Administrator", status: "pending", completedAt: null }];
+    }
+  } else {
+    if (!a.recommendedActions?.length) return err(res, 400, "NO_ACTIONS", "Assessment has no actions to plan.");
+    actions = a.recommendedActions.map((x, i) => ({ actionId: `act_${i + 1}`, label: x.label, owner: x.owner, status: "pending", completedAt: null }));
+  }
+
   const t = now();
+  
+  const receiptPayload = {
+    assessmentId: a.assessmentId,
+    campusId: a.campusId,
+    activity: a.activity,
+    assessmentTimestamp: a.createdAt,
+    evidence: a.evidence,
+    dataQuality: a.dataQuality,
+    selectedAlternative: customAlternativeId || 'Top Recommendation',
+    actions: actions.map(x => x.label)
+  };
+  const hash = createHash("sha256").update(stableStringify(receiptPayload)).digest("hex");
+  const decisionReceipt = {
+    ...receiptPayload,
+    generatedAt: t,
+    hash
+  };
+
   const plan = {
     planId: uid("plan"), assessmentId: a.assessmentId, campusId: a.campusId,
     status: "draft", createdAt: t, updatedAt: t, approvedBy: null,
-    actions: a.recommendedActions.map((x, i) => ({ actionId: `act_${i + 1}`, label: x.label, owner: x.owner, status: "pending", completedAt: null })),
-    audit: [{ at: t, by: "system", event: `Draft created from ${a.assessmentId} (${a.status})` }],
+    actions,
+    decisionReceipt,
+    audit: [{ at: t, by: "system", event: `Draft created from ${a.assessmentId} (${customAlternativeId ? `Alternative: ${customAlternativeId}` : 'Top Recommendation'})` }],
   };
   db.plans.set(plan.planId, plan);
   res.status(201).json(plan);
@@ -203,7 +216,7 @@ app.get("/api/v1/action-plans", (req, res) => {
   res.json({ plans: byNew(items) });
 });
 
-// Update action plan (approve / dismiss / update task)
+// Update action plan (approve / dismiss / update task / record_outcome)
 app.patch("/api/v1/action-plans/:planId", (req, res) => {
   const p = db.plans.get(req.params.planId);
   if (!p) return err(res, 404, "PLAN_NOT_FOUND", "Unknown planId.");
@@ -216,6 +229,8 @@ app.patch("/api/v1/action-plans/:planId", (req, res) => {
   } else if (operation === "dismiss_plan") {
     if (p.status !== "draft") return err(res, 400, "INVALID_TRANSITION", "Only draft plans can be dismissed.");
     p.status = "dismissed";
+    p.dismissedBy = by;
+    p.dismissedAt = t;
     const reason = clean(req.body.reason, 200);
     p.audit.push({ at: t, by, event: reason ? `Plan dismissed: ${reason}` : "Plan dismissed" });
   } else if (operation === "update_action") {
@@ -227,11 +242,41 @@ app.patch("/api/v1/action-plans/:planId", (req, res) => {
     a.status = status;
     a.completedAt = status === "completed" ? t : null;
     if (p.actions.every(x => x.status === "completed")) p.status = "completed";
+  } else if (operation === "record_outcome") {
+    if (!['completed', 'approved', 'dismissed'].includes(p.status)) {
+      return err(res, 400, "INVALID_TRANSITION", "Outcome can only be recorded for completed, approved, or dismissed plans.");
+    }
+    const validOutcomes = ["improved", "unchanged", "worsened", "unable_to_determine"];
+    const outcomeStatus = clean(req.body.outcomeStatus, 40);
+    if (!validOutcomes.includes(outcomeStatus)) {
+      return err(res, 400, "INVALID_OUTCOME", `outcomeStatus must be one of: ${validOutcomes.join(", ")}.`);
+    }
+    p.outcomeStatus = outcomeStatus;
+    p.outcomeNotes = clean(req.body.outcomeNotes || "", 500);
+    p.outcomeRecordedAt = t;
+    p.outcomeRecordedBy = by;
+    p.outcomeEvidenceSource = clean(req.body.outcomeEvidenceSource || "", 200);
+    p.audit.push({ at: t, by, event: `Outcome recorded: ${outcomeStatus}${p.outcomeNotes ? " — " + p.outcomeNotes.slice(0, 80) : ""}` });
   } else {
     return err(res, 400, "INVALID_OPERATION", "Unsupported operation.");
   }
   p.updatedAt = t;
   res.json(p);
+});
+
+// Verify Decision Receipt integrity
+app.post("/api/v1/verify-receipt", (req, res) => {
+  const { receipt } = req.body;
+  if (!receipt || !receipt.hash) return err(res, 400, "INVALID_RECEIPT", "Receipt or hash missing.");
+  
+  const { hash, generatedAt, ...payload } = receipt;
+  const computedHash = createHash("sha256").update(stableStringify(payload)).digest("hex");
+  
+  if (computedHash === hash) {
+    res.json({ valid: true, message: "Receipt cryptographically verified and untampered." });
+  } else {
+    res.json({ valid: false, message: "Receipt tampering detected. Hash mismatch." });
+  }
 });
 
 // Create incident
@@ -249,6 +294,17 @@ app.get("/api/v1/incidents", (req, res) => {
   const cid = req.query.campusId;
   const items = [...db.incidents.values()].filter(i => !cid || i.campusId === cid);
   res.json({ incidents: byNew(items) });
+});
+
+// Get recommendations for an assessment
+app.get("/api/v1/recommendations", (req, res) => {
+  const { assessmentId } = req.query;
+  if (!assessmentId) return err(res, 400, "MISSING_PARAM", "assessmentId is required.");
+  const assessment = db.assessments.get(clean(assessmentId, 40));
+  if (!assessment) return err(res, 404, "ASSESSMENT_NOT_FOUND", "Unknown assessmentId.");
+  const recommendations = assessment.recommendations || [];
+  const whatIfOptions = getWhatIfOptions(assessment, assessment.dataQuality);
+  res.json({ assessmentId, recommendations, whatIfOptions });
 });
 
 // ─── 404 catch-all ────────────────────────────────────────────────────────────

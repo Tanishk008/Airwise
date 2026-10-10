@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
-import { api, Campus, AirwiseApiError, Assessment, ActionPlan } from "@/lib/api";
+import { api, Campus, AirwiseApiError } from "@/lib/api";
 
 export interface AppAlert {
   id: string;
@@ -121,13 +121,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    loadCampuses();
+    void (async () => {
+      await loadCampuses();
+    })();
   }, [loadCampuses, refreshKey]);
 
   useEffect(() => {
-    if (campuses.length > 0) {
-      loadAlerts(campuses);
-    }
+    void (async () => {
+      if (campuses.length > 0) {
+        await loadAlerts(campuses);
+      }
+    })();
   }, [campuses, refreshKey, loadAlerts]);
 
   const selectedCampus = campuses.find(c => c.campusId === selectedCampusId) ?? null;

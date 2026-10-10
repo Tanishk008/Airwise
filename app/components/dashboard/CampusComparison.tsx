@@ -22,9 +22,8 @@ export function CampusComparisonModal({ isOpen, onClose }: { isOpen: boolean; on
 
   useEffect(() => {
     if (!isOpen || !campuses.length) return;
-    setLoading(true);
-
     const loadAll = async () => {
+      setLoading(true);
       const results = await Promise.all(
         campuses.map(async c => {
           try {
