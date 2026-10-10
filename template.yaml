@@ -35,7 +35,10 @@ Resources:
   CampusTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
       AttributeDefinitions:
         - { AttributeName: campusId, AttributeType: S }
       KeySchema:
@@ -44,7 +47,10 @@ Resources:
   AssessTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
       AttributeDefinitions:
         - { AttributeName: assessmentId, AttributeType: S }
         - { AttributeName: campusId, AttributeType: S }
@@ -58,11 +64,17 @@ Resources:
             - { AttributeName: createdAt, KeyType: RANGE }
           Projection:
             ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
 
   PlanTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
       AttributeDefinitions:
         - { AttributeName: planId, AttributeType: S }
         - { AttributeName: campusId, AttributeType: S }
@@ -76,11 +88,17 @@ Resources:
             - { AttributeName: createdAt, KeyType: RANGE }
           Projection:
             ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
 
   IncidentTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
       AttributeDefinitions:
         - { AttributeName: incidentId, AttributeType: S }
         - { AttributeName: campusId, AttributeType: S }
@@ -94,6 +112,9 @@ Resources:
             - { AttributeName: reportedAt, KeyType: RANGE }
           Projection:
             ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
 
   # ─── API Gateway ──────────────────────────────────────────────────────────────
 
