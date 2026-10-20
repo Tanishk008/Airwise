@@ -105,7 +105,6 @@ sam build
 sam deploy --guided
 ```
 *Outputs the `ApiUrl` (e.g. `https://xyz.execute-api.ap-south-1.amazonaws.com`).*
-
 ### Deploy Frontend with AWS Amplify
 1. Connect this GitHub repository in the **AWS Amplify Console**.
 2. Add environment variable: `NEXT_PUBLIC_API_URL=<your-api-gateway-url>`.
