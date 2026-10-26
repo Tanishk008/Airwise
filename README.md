@@ -16,7 +16,7 @@
 ## 🚀 Quick Start (Local Development)
 
 ### 1. Clone & Install Dependencies
-```bash
+```bash 
 git clone https://github.com/Tanishk008/Airwise.git
 cd Airwise
 ```
