@@ -1,4 +1,4 @@
-# 🌫️ AIRWISE — Air Quality Intelligence & Response System
+# 🌫️ AIRWISE — Air Quality Intelligence and Response System
 
 > Closed-loop environmental decision-support system for Delhi-NCR campuses:  
 > **MEASURE → ASSESS → DECIDE → ACT → VERIFY**
